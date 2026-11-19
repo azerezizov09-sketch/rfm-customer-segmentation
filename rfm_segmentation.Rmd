@@ -1,0 +1,285 @@
+---
+title: "Full RFM Segmentation and Customer Profiling"
+author: "AzizovAzer"
+date: "`r format(Sys.Date(), '%d %b %Y')`"
+output: 
+  html_document:
+    toc: true
+    toc_float: true
+    code_folding: show
+---
+
+## Overview
+
+**Dataset:** `sales_data_sample.csv` (Kaggle: kyanyoga/sample-sales-data). Analiz R-də aparılıb.
+
+**RFM metodologiyası:**
+
+- **Recency (R):** reference date ilə müştərinin son sifarişi arasındakı gün sayı (az = yaxşı).
+- **Frequency (F):** müştərinin unikal `ORDERNUMBER` sayı.
+- **Monetary (M):** müştərinin ümumi `SALES` məbləği.
+
+Hər metrik `ntile(x, 4)` ilə 1-4 arası ballandırılır (4 = ən yaxşı). Recency üçün `desc(Recency)` istifadə olunur ki, ən yaxın tarixli müştərilər 4 alsın.
+
+**Seqment qaydaları** (yuxarıdan aşağı yoxlanılır):
+
+| Segment | Qayda |
+|---|---|
+| Champions | R=4, F=4, M=4 |
+| At Risk | R=1, F>=3, M>=3 |
+| Lost | R=1, F=1, M=1 |
+| Loyal | R>=2, F>=3 |
+| Needs Attention | qalan hamı |
+
+## Setup 
+
+```{r setup, error=FALSE, message=FALSE, warning=FALSE, echo=TRUE, include=TRUE}
+library(tidyverse)
+library(plotly)
+library(lubridate)
+df <- read_csv("sales_data_sample.csv",
+               locale = locale(encoding = "latin1"))
+```
+
+## Data Preparation
+
+ORDERDATE `"2/24/2003 0:00"` formatındadır, onu tarixə çeviririk. Reference date ən son sifariş tarixindən 1 gün sonradır.
+
+```{r task1, error=FALSE, message=FALSE, warning=FALSE, echo=TRUE, include=TRUE}
+df <- df %>%
+  mutate(ORDERDATE = as.Date(mdy_hm(ORDERDATE)))
+
+reference_date <- max(df$ORDERDATE) + 1
+reference_date   # 2005-06-01 olmalıdır
+```
+## Hər müştəri üçün R, F, M hesablanması
+
+
+```{r task2, error=FALSE, message=FALSE, warning=FALSE, echo=TRUE, include=TRUE}
+rfm <- df %>%
+  group_by(CUSTOMERNAME) %>%
+  summarise(
+    Recency   = as.numeric(reference_date - max(ORDERDATE)), 
+    Frequency = n_distinct(ORDERNUMBER),                      
+    Monetary  = sum(SALES)                                    
+  ) %>%
+  ungroup()
+
+
+nrow(rfm)        
+head(rfm)
+summary(rfm)
+
+```
+
+## 1-4 arası ballandırma və RFM_Segment
+
+
+```{r task3, error=FALSE, message=FALSE, warning=FALSE, echo=TRUE, include=TRUE}
+rfm <- rfm %>%
+  mutate(
+    # Recency: az gün = yaxşı, ona görə tərsinə (desc) ballandırırıq
+    # ən yaxın tarixli müştərilər 4, ən köhnələr 1 alır
+    R_Score = ntile(desc(Recency), 4),
+
+    # Frequency və Monetary: çox = yaxşı, 4 ən yüksək
+    F_Score = ntile(Frequency, 4),
+    M_Score = ntile(Monetary, 4),
+
+    # Üç balı string kimi birləşdir, məsələn "444", "311"
+    RFM_Segment = paste0(R_Score, F_Score, M_Score)
+  )
+
+# Yoxlama
+head(rfm)
+table(rfm$R_Score)
+table(rfm$F_Score)
+table(rfm$M_Score)
+
+```
+
+## 5 adlı seqmentin təyini
+
+
+```{r task4, error=FALSE, message=FALSE, warning=FALSE, echo=TRUE, include=TRUE}
+rfm <- rfm %>%
+ mutate(Segment = case_when(
+      R_Score == 4 & F_Score == 4 & M_Score == 4 ~ "Champions",      # ən yaxşı müştərilər
+      R_Score == 1 & F_Score >= 3 & M_Score >= 3 ~ "At Risk",        # əvvəl güclü idi, indi uzaqlaşıb
+      R_Score == 1 & F_Score == 1 & M_Score == 1 ~ "Lost",           # uzun müddətdir yoxdur, az alıb
+      R_Score >= 2 & F_Score >= 3                ~ "Loyal",          # tez-tez alır, hələ aktivdir
+      TRUE                                       ~ "Needs Attention" # qalan hamı
+    ),
+    
+    Segment = factor(Segment,
+                     levels = c("Champions", "Loyal", "Needs Attention",
+                                "At Risk", "Lost"))
+  )
+
+table(rfm$Segment)
+sum(table(rfm$Segment))   
+```
+
+
+## Seqment xülasə cədvəli
+
+
+```{r task5, error=FALSE, message=FALSE, warning=FALSE, echo=TRUE, include=TRUE}
+segment_summary <- rfm %>%
+  group_by(Segment) %>%
+  summarise(
+    Customer_Count = n(),
+    Avg_Recency    = round(mean(Recency), 1),
+    Avg_Frequency  = round(mean(Frequency), 1),
+    Avg_Monetary   = round(mean(Monetary), 0),
+    Total_Monetary = sum(Monetary)
+  ) %>%
+  mutate(
+    Revenue_Share_Pct = round(Total_Monetary / sum(Total_Monetary) * 100, 1)
+  ) %>%
+  arrange(Segment)
+
+knitr::kable(segment_summary, caption = "RFM segment summary")
+```
+
+```{r helper, include=FALSE}
+get_seg <- function(s, col) segment_summary[[col]][segment_summary$Segment == s]
+```
+
+**Əsas nəticələr:**
+
+- **Champions:** `r get_seg("Champions", "Customer_Count")` müştəri, ümumi satışın `r get_seg("Champions", "Revenue_Share_Pct")`%-i.
+- **At Risk:** `r get_seg("At Risk", "Customer_Count")` müştəri, əvvəllər güclü idi, indi uzaqlaşıb.
+- **Lost:** `r get_seg("Lost", "Customer_Count")` müştəri, reaktivasiya kampaniyası lazımdır.
+
+
+## Rənglər
+
+
+```{r task6, error=FALSE, message=FALSE, warning=FALSE, echo=TRUE, include=TRUE}
+segment_colors <- c(
+  "Champions"       = "#2E7D32",  # yaşıl
+  "Loyal"           = "#1976D2",  # mavi
+  "Needs Attention" = "#F9A825",  # sarı
+  "At Risk"         = "#EF6C00",  # narıncı
+  "Lost"            = "#C62828"   # qırmızı
+)
+```
+
+
+## Seqment ölçülərinin bar chart-ı
+
+Hər seqmentdə neçə müştəri olduğunu göstərir.
+
+
+```{r task7, error=FALSE, message=FALSE, warning=FALSE, echo=TRUE, include=TRUE}
+ggplot(segment_summary, aes(x = Segment, y = Customer_Count, fill = Segment)) +
+  geom_col(show.legend = FALSE) +
+  geom_text(aes(label = Customer_Count), vjust = -0.5, size = 4) +
+  scale_fill_manual(values = segment_colors) +
+  labs(title = "Customer Count by Segment",
+       x = "Segment", y = "Number of Customers") +
+  theme_minimal(base_size = 12)
+```
+
+
+## Recency vs Monetary scatter plot
+
+Monetary dəyərləri çox geniş aralıqda olduğu üçün y oxu log miqyasındadır.
+
+
+```{r task8, error=FALSE, message=FALSE, warning=FALSE, echo=TRUE, include=TRUE}
+ggplot(rfm, aes(x = Recency, y = Monetary, color = Segment)) +
+  geom_point(size = 3, alpha = 0.8) +
+  scale_color_manual(values = segment_colors) +
+  scale_y_log10(labels = scales::comma) +
+  labs(title = "Recency vs Monetary by Segment",
+       x = "Recency (days since last order)",
+       y = "Monetary (total sales, log scale)") +
+  theme_minimal(base_size = 12)
+
+```
+
+
+## Orta RFM ballarının heatmap-i
+
+Hər seqmentin orta R, F və M balını göstərir (1 = ən zəif, 4 = ən güclü).
+
+
+```{r task9, error=FALSE, message=FALSE, warning=FALSE, echo=TRUE, include=TRUE}
+heatmap_data <- rfm %>%
+  group_by(Segment) %>%
+  summarise(R = mean(R_Score), F = mean(F_Score), M = mean(M_Score)) %>%
+  pivot_longer(cols = c(R, F, M), names_to = "Metric", values_to = "Avg_Score")
+
+ggplot(heatmap_data, aes(x = Metric, y = Segment, fill = Avg_Score)) +
+  geom_tile(color = "white") +
+  geom_text(aes(label = round(Avg_Score, 2)), size = 4) +
+  scale_fill_gradient(low = "#FFF3E0", high = "#2E7D32", limits = c(1, 4)) +
+  scale_y_discrete(limits = rev(levels(rfm$Segment))) +
+  labs(title = "Average RFM Scores by Segment",
+       x = "", y = "", fill = "Avg score") +
+  theme_minimal(base_size = 12)
+```
+
+
+## Marketinq tədbirləri
+
+
+```{r task10, error=FALSE, message=FALSE, warning=FALSE, echo=TRUE, include=TRUE}
+actions <- tribble(
+  ~Segment,          ~Profile,                                              ~Marketing_Actions,
+  "Champions",       "Yaxınlarda alıb, tez-tez alır, çox xərcləyir",         "VIP/loyallıq proqramı, yeni məhsullara erkən çıxış, fərdi menecer, tövsiyə (referral) və rəy istəmək",
+  "Loyal",           "Aktivdir və tez-tez alır, amma ən çox xərcləyən deyil", "Əlavə satış (upsell/cross-sell) paketləri, Champions-a yüksəlmək üçün pilləli mükafatlar, həcmə görə endirimlər",
+  "Needs Attention", "Bütün göstəricilərdə orta, uzaqlaşa bilər",            "Vaxt məhdudiyyətli təkliflər, fərdi məhsul tövsiyələri, əvvəlki alışlara əsasən xatırlatma e-poçtları",
+  "At Risk",         "Əvvəllər güclü müştəri idi, indi uzaqlaşıb",           "Fərdi əlaqə (zəng/e-poçt), geri qaytarma endirimi, niyə getdiyini öyrənmək üçün qısa sorğu, yeniliklərin təqdimatı",
+  "Lost",            "Uzun müddətdir yoxdur, az alıb və az xərcləyib",       "Aşağı büdcəli reaktivasiya kampaniyası, son şans təklifi; cavab gəlmirsə, marketinq büdcəsini bu qrupa xərcləməyi dayandırmaq"
+) %>%
+  mutate(Segment = factor(Segment, levels = levels(rfm$Segment)))
+
+segment_summary %>%
+  select(Segment, Customer_Count, Avg_Monetary, Revenue_Share_Pct) %>%
+  left_join(actions, by = "Segment") %>%
+  knitr::kable()
+```
+
+
+## CSV export
+
+
+```{r task11, error=FALSE, message=FALSE, warning=FALSE, echo=TRUE, include=TRUE}
+write_csv(rfm, "rfm_report.csv")
+```
+
+
+## Bonus: 3D scatter plot
+
+İnteraktivdir: fırlatmaq və böyütmək olar. Monetary oxu log miqyasındadır.
+
+
+```{r task12, error=FALSE, message=FALSE, warning=FALSE, echo=TRUE, include=TRUE}
+plot_ly(
+  data = rfm,
+  x = ~Recency,
+  y = ~Frequency,
+  z = ~Monetary,
+  color = ~Segment,
+  colors = segment_colors,
+  type = "scatter3d",
+  mode = "markers",
+  marker = list(size = 4, opacity = 0.8),
+  text = ~paste0(CUSTOMERNAME,
+                 "<br>RFM: ", RFM_Segment),
+  hoverinfo = "text+x+y+z"
+) %>%
+  layout(
+    title = "3D RFM Segments",
+    scene = list(
+      xaxis = list(title = "Recency (days)"),
+      yaxis = list(title = "Frequency (orders)"),
+      zaxis = list(title = "Monetary", type = "log")
+    )
+  )
+```
+
+
